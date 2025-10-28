@@ -1,7 +1,7 @@
 mod tree_sitter;
 mod sfapex;
 
-use tree_sitter::Parser;
+use tree_sitter::{Parser, Query, QueryCursor};
 
 fn main() {
     println!("=== Tree-sitter Salesforce Grammar Demo ===\n");
@@ -9,7 +9,8 @@ fn main() {
     // Parse some Apex code
     println!("1. Parsing APEX Code\n");
     let mut parser = Parser::new();
-    parser.set_language(sfapex::apex::language()).unwrap();
+    let apex_lang = sfapex::apex::language();
+    parser.set_language(apex_lang).unwrap();
 
     let apex_code = r#"
 /**
@@ -209,7 +210,10 @@ public class OrderManagementService {
 }"#;
 
     let tree = parser.parse(apex_code).expect("Failed to parse Apex code");
-    println!("Parse tree (S-expression):\n{}\n", tree.root_node().to_sexp());
+
+    // Extract semantic information using queries
+    println!("Extracting class and method information...\n");
+    extract_apex_info(&tree, apex_lang, apex_code);
 
     // Parse some SOQL
     println!("2. Parsing SOQL Query\n");
@@ -245,3 +249,92 @@ LIMIT 50"#;
 
     println!("=== All parsing completed successfully! ===");
 }
+
+fn extract_apex_info(tree: &tree_sitter::Tree, language: *const std::ffi::c_void, source: &str) {
+    // Query for class declarations
+    let class_query_str = r#"
+        (class_declaration
+            name: (identifier) @class.name) @class.definition
+
+        (enum_declaration
+            name: (identifier) @enum.name) @enum.definition
+    "#;
+
+    // Query for method declarations with more details
+    let method_query_str = r#"
+        (method_declaration
+            type: (_) @method.return_type
+            name: (identifier) @method.name
+            parameters: (formal_parameters) @method.parameters) @method.definition
+
+        (constructor_declaration
+            name: (identifier) @constructor.name
+            parameters: (formal_parameters) @constructor.parameters) @constructor.definition
+    "#;
+
+    // Execute class query
+    let class_query = Query::new(language, class_query_str)
+        .expect("Failed to create class query");
+    let mut cursor = QueryCursor::new();
+    cursor.exec(&class_query, &tree.root_node());
+
+    println!("Classes and Enums found:");
+    println!("========================");
+    while let Some(captures) = cursor.next_match(&class_query) {
+        for (name, node) in captures {
+            if name.contains("class.name") || name.contains("enum.name") {
+                let text = node.utf8_text(source);
+                let kind = if name.contains("enum") { "Enum" } else { "Class" };
+                println!("  {} {}: {}", kind, name, text);
+            }
+        }
+    }
+
+    // Execute method query
+    let method_query = Query::new(language, method_query_str)
+        .expect("Failed to create method query");
+    let mut cursor = QueryCursor::new();
+    cursor.exec(&method_query, &tree.root_node());
+
+    println!("\nMethods and Constructors found:");
+    println!("================================");
+
+    while let Some(captures) = cursor.next_match(&method_query) {
+        let mut method_name = String::new();
+        let mut return_type = String::new();
+        let mut params = String::new();
+        let mut is_constructor = false;
+
+        // Process all captures in this match
+        for (name, node) in captures {
+            match name.as_str() {
+                "method.name" => {
+                    method_name = node.utf8_text(source).to_string();
+                }
+                "constructor.name" => {
+                    method_name = node.utf8_text(source).to_string();
+                    is_constructor = true;
+                }
+                "method.return_type" => {
+                    return_type = node.utf8_text(source).to_string();
+                }
+                "method.parameters" | "constructor.parameters" => {
+                    params = node.utf8_text(source).to_string();
+                }
+                _ => {}
+            }
+        }
+
+        // Print this match
+        if !method_name.is_empty() {
+            if is_constructor {
+                println!("  Constructor: {}{}", method_name, params);
+            } else {
+                println!("  Method: {} {}{}", return_type, method_name, params);
+            }
+        }
+    }
+
+    println!();
+}
+
