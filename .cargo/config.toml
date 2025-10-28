@@ -1,0 +1,7 @@
+[build]
+rustflags = [
+    "-L", "grammars",
+    "-l", "static=sfapex",
+    "-L", "/usr/local/lib",
+    "-l", "tree-sitter"
+]
