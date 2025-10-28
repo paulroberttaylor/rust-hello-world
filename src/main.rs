@@ -215,6 +215,10 @@ public class OrderManagementService {
     println!("Extracting class and method information...\n");
     extract_apex_info(&tree, apex_lang, apex_code);
 
+    // Extract and parse embedded SOQL queries
+    println!("Extracting embedded SOQL queries...\n");
+    extract_soql_from_apex(&tree, apex_lang, apex_code);
+
     // Parse some SOQL
     println!("2. Parsing SOQL Query\n");
     parser.set_language(sfapex::soql::language()).unwrap();
@@ -336,5 +340,125 @@ fn extract_apex_info(tree: &tree_sitter::Tree, language: *const std::ffi::c_void
     }
 
     println!();
+}
+
+fn extract_soql_from_apex(tree: &tree_sitter::Tree, language: *const std::ffi::c_void, source: &str) {
+    // Query for embedded SOQL queries
+    let soql_query_str = r#"
+        (query_expression
+            (soql_query_body) @soql.query) @soql.expression
+    "#;
+
+    let query = Query::new(language, soql_query_str)
+        .expect("Failed to create SOQL query");
+    let mut cursor = QueryCursor::new();
+    cursor.exec(&query, &tree.root_node());
+
+    let mut query_count = 0;
+
+    while let Some(captures) = cursor.next_match(&query) {
+        for (name, node) in captures {
+            if name == "soql.query" {
+                query_count += 1;
+                let soql_text = node.utf8_text(source);
+
+                println!("Embedded SOQL Query #{}:", query_count);
+                println!("------------------------");
+                println!("{}", soql_text);
+
+                // Now parse this SOQL with the SOQL grammar
+                let mut soql_parser = Parser::new();
+                let soql_lang = sfapex::soql::language();
+                soql_parser.set_language(soql_lang).unwrap();
+
+                if let Some(soql_tree) = soql_parser.parse(soql_text) {
+                    println!("\nSOQL Structure:");
+                    analyze_soql(&soql_tree, soql_lang, soql_text);
+                }
+                println!();
+            }
+        }
+    }
+
+    if query_count == 0 {
+        println!("  No embedded SOQL queries found.");
+    }
+    println!();
+}
+
+fn analyze_soql(tree: &tree_sitter::Tree, language: *const std::ffi::c_void, source: &str) {
+    // Query to extract SOQL components
+    let soql_analysis_query = r#"
+        (select_clause
+            (field_identifier) @field)
+
+        (from_clause
+            (storage_identifier) @from_object)
+
+        (where_clause) @where
+
+        (order_by_clause) @order_by
+
+        (limit_clause) @limit
+
+        (subquery) @subquery
+    "#;
+
+    let query = Query::new(language, soql_analysis_query)
+        .expect("Failed to create SOQL analysis query");
+    let mut cursor = QueryCursor::new();
+    cursor.exec(&query, &tree.root_node());
+
+    let mut fields = Vec::new();
+    let mut from_objects = Vec::new();
+    let mut has_where = false;
+    let mut has_order_by = false;
+    let mut has_limit = false;
+    let mut subquery_count = 0;
+
+    while let Some(captures) = cursor.next_match(&query) {
+        for (name, node) in captures {
+            match name.as_str() {
+                "field" => {
+                    fields.push(node.utf8_text(source).to_string());
+                }
+                "from_object" => {
+                    from_objects.push(node.utf8_text(source).to_string());
+                }
+                "where" => has_where = true,
+                "order_by" => has_order_by = true,
+                "limit" => has_limit = true,
+                "subquery" => subquery_count += 1,
+                _ => {}
+            }
+        }
+    }
+
+    if !from_objects.is_empty() {
+        println!("  FROM: {}", from_objects.join(", "));
+    }
+
+    if !fields.is_empty() {
+        println!("  SELECT fields: {} field(s)", fields.len());
+        for field in fields.iter().take(5) {
+            println!("    - {}", field);
+        }
+        if fields.len() > 5 {
+            println!("    ... and {} more", fields.len() - 5);
+        }
+    }
+
+    if has_where {
+        println!("  ✓ Has WHERE clause");
+    }
+    if has_order_by {
+        println!("  ✓ Has ORDER BY clause");
+    }
+    if has_limit {
+        println!("  ✓ Has LIMIT clause");
+    }
+    if subquery_count > 0 {
+        println!("  ✓ Contains {} subquery(ies)", subquery_count);
+    }
 }
 
